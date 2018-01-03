@@ -1,0 +1,139 @@
+---
+title: "Predict Activity from Human Activity Recognition Study"
+author: "ck"
+date: "3 1 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Synopsis
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. 
+They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+The data for this project come from [Human Activity Recognition Study *1]( http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har) (uploaded 2nd January 2018).
+
+The major tasks of this project is to predict the manner in which observed subjects did the exercise sorted in five activity classes:
+* exactly according to the specification (Class A)
+* throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D), throwing the hips to the front (Class E)
+
+With an accuracy of 99%, random forest as a prediction model represents the outcome classe as best in comparison to gradient boosting and clustering/regression trees under control of modeling with cross-validation. 
+That model was built on predictor variable with no miissing data. 
+
+*1 Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+```{r, include=FALSE}
+library(data.table)
+data.complete <- fread('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+                       , na.strings=c("NA","#DIV/0!", ""))
+data.to.predict <- fread('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+                         , na.strings=c("NA","#DIV/0!", ""))
+# dim(data.complete)
+# dim(data.to.predict)
+```
+
+# Data Clarification
+
+Outcome variable is "classe" in the training set (Class of Human Activity), irrelevant columns 1 to 7 will be removed, any of the other variables are predictor variables. Only predictor variables will be used, where no missing data exists. 
+
+```{r}
+data.complete <- data.complete[,-c(1:7)]
+data.to.predict <- data.to.predict[,-c(1:7)]
+
+# outcome = factorized data.complete$classe
+# predictors attributes(data.complete[,-c("classe")])
+data.complete$classe <- as.factor(data.complete$classe)
+
+# exclusion of features with missing data
+inCols <- colnames(data.complete)[as.vector(colSums(is.na(data.complete)) == 0)]
+data.complete <- subset(data.complete, select=inCols)
+data.to.predict <- subset(data.to.predict, select=inCols[-53]) 
+# 53th variable is non-existing outcome var "classe"
+```
+
+# Data Exploration
+
+```{r}
+#str(data.complete)
+
+table(data.complete$classe)
+
+library(caret)
+# plot features
+features.total <- which(grepl("^total", colnames(data.complete), ignore.case = F))
+data.complete.total <- subset(data.complete, select=features.total)
+featurePlot(x = data.complete.total, y = data.complete$classe, pch = 19, main = "Feature plot", 
+    plot = "pairs")
+```
+
+# Cross-Validation
+
+For existing dataset with a medium sample sizes 60% of observations are used in training dataset to fit a model and 40% in test dataset for cross validation issue in order to control goodness of model fit (bias vs. variance). 
+
+Cross validation is done for each model with K = 3.
+
+```{r, include=FALSE}
+inTraining <- createDataPartition(data.complete$classe, p=0.6, list=F)
+data.train <- data.complete[inTraining, ]
+data.test <- data.complete[-inTraining, ]
+
+# train control
+trControl <- trainControl(method = "cv", number = 3)
+```
+
+# Prediction Model
+
+Predicting factor variable "classe" is a problem of clustering with multivariate predictors. Tree-based clustering are appropriate method of statistical learning for prediction of outcome variable. 
+For improving accuracy, different prediction models will be used (Random forest "rf", classification and regression tree model "cart" and stochastic gradient boosting model "gbm") and furtheron be combined.
+
+```{r, include=FALSE}
+fit.rf <- train(classe~., data=data.train, method="rf", trControl=trControl, ntree=100)
+fit.gbm <- train(classe~., data=data.train, method="gbm", trControl=trControl)
+fit.cart <- train(classe~., data=data.train, method="rpart", trControl=trControl)
+
+pred.rf <- predict(fit.rf, data.test)
+pred.gbm <- predict(fit.gbm, data.test)
+pred.cart <- predict(fit.cart, data.test)
+
+# combination of prediction models
+data.combo <- data.frame(pred.rf, pred.gbm, pred.cart, classe=data.test$classe)
+#data.combo <- data.frame(pred.gbm, pred.rpart, classe=data.test$classe)
+fit.combo <- train(classe ~ ., method="rf", data=data.combo, ntree=100)
+pred.combo <- predict(fit.combo, data.combo)
+```
+
+# Expected out-of sample error
+
+```{r}
+confmtx.rf <- confusionMatrix(pred.rf, data.test$classe)
+confmtx.gbm <- confusionMatrix(pred.gbm, data.test$classe)
+confmtx.cart <- confusionMatrix(pred.cart, data.test$classe)
+
+confmtx.combo <- confusionMatrix(pred.combo, data.combo$classe)
+
+(accuracy.total <- data.frame(
+  Model = c('RF', 'GBM', 'CART', 'Combo'),
+  Accuracy = rbind(confmtx.rf$overall[1], confmtx.gbm$overall[1], confmtx.cart$overall[1]
+                   , confmtx.combo$overall[1])
+))
+```
+
+Predicting with Random Forest shows best result (as far as combination of models), gbm and cart follows. 
+
+# Submit Prediction
+
+Due to best accuracy results for prediction with random forest model, in following that model is used for prediction of new values. 
+
+```{r}
+submit.data.to.predict <- predict(fit.rf, newdata=data.to.predict)
+data.to.predict$classe <- submit.data.to.predict
+
+comparison <- rbind(prop.table(table(data.complete$classe)), prop.table(table(data.to.predict$classe)))
+row.names(comparison) <- c("existing data", "predicted data")
+comparison
+
+```
+
+Distribution of frequencies of human activity classes in existing data differs from predicted classes. 
